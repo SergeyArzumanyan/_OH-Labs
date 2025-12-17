@@ -1,63 +1,123 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <sys/select.h>
+/*
+ * HOW TO RUN ON macOS:
+ * 1. Compile: gcc -o lab8-3 lab8-3.c
+ * 2. Run the server: ./lab8-3
+ * 3. In another terminal, connect using: nc localhost 5555
+ *    Or use the lab8-4 client program
+ * 4. Type messages - the server will echo them back
+ * 5. Press Ctrl+C to stop the server
+ * 
+ * This is a TCP echo server using IPv4.
+ * It uses select() for multiplexing multiple client connections.
+ * Messages from clients are echoed back to the same client.
+ */
 
-#define PORT 5555
-#define BUF_SIZE 1024
-#define MAX_CLIENTS 10
+#include <stdio.h>      // Standard I/O functions (printf, perror)
+#include <stdlib.h>     // Standard library functions (exit)
+#include <string.h>     // String manipulation (memset)
+#include <unistd.h>      // POSIX API (read, write, close)
+#include <arpa/inet.h>  // Internet address manipulation (htons, INADDR_ANY)
+#include <sys/select.h>  // Select function for I/O multiplexing
+#include <sys/socket.h> // Socket functions (socket, bind, listen, accept, setsockopt)
+
+#define PORT 5555           // Server port number
+#define BUF_SIZE 1024       // Buffer size for reading messages
+#define MAX_CLIENTS 10      // Maximum number of concurrent clients
 
 int main() {
-    int sfd, clients[MAX_CLIENTS], opt=1;
-    struct sockaddr_in addr;
-    char buf[BUF_SIZE];
-    fd_set all_fds, read_fds;
-    int i, maxfd;
+    int sfd;                        // Server socket file descriptor
+    int clients[MAX_CLIENTS];       // Array to store client file descriptors
+    int opt=1;                      // Option value for setsockopt
+    struct sockaddr_in addr;         // IPv4 socket address structure
+    char buf[BUF_SIZE];             // Buffer for reading messages
+    fd_set all_fds;                 // Set of all file descriptors to monitor
+    fd_set read_fds;                // Set of file descriptors ready for reading
+    int i, maxfd;                   // Loop counter and maximum file descriptor
 
+    // Initialize all client slots to -1 (empty)
     for(i=0;i<MAX_CLIENTS;i++) clients[i]=-1;
 
+    // Create a TCP socket (IPv4, connection-oriented)
+    // AF_INET = IPv4 address family
+    // SOCK_STREAM = reliable, connection-oriented byte stream (TCP)
     sfd = socket(AF_INET, SOCK_STREAM, 0);
     if(sfd<0){ perror("socket"); exit(1); }
 
+    // Set socket option to allow address reuse
+    // This prevents "Address already in use" errors when restarting the server
     setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    addr.sin_family=AF_INET;
-    addr.sin_port=htons(PORT);
-    addr.sin_addr.s_addr=INADDR_ANY;
-    memset(addr.sin_zero,0,sizeof(addr.sin_zero));
+    // Set up the server address structure
+    addr.sin_family=AF_INET;            // IPv4 address family
+    addr.sin_port=htons(PORT);          // Convert port to network byte order
+    addr.sin_addr.s_addr=INADDR_ANY;    // Listen on all network interfaces
+    memset(addr.sin_zero,0,sizeof(addr.sin_zero));  // Zero out padding bytes
 
+    // Bind the socket to the address
     if(bind(sfd,(struct sockaddr*)&addr,sizeof(addr))<0){ perror("bind"); exit(1); }
+    
+    // Mark the socket as a listening socket
+    // 5 = maximum number of pending connections in the queue
     if(listen(sfd,5)<0){ perror("listen"); exit(1); }
 
-    FD_ZERO(&all_fds);
-    FD_SET(sfd,&all_fds);
-    maxfd=sfd;
+    // Initialize the file descriptor set for select()
+    FD_ZERO(&all_fds);           // Clear all bits in the set
+    FD_SET(sfd,&all_fds);         // Add server socket to the set
+    maxfd=sfd;                     // Track the highest file descriptor number
 
     printf("TCP Echo server running on port %d...\n", PORT);
 
+    // Main server loop
     while(1){
+        // Copy all_fds to read_fds (select() modifies the set)
         read_fds = all_fds;
+        
+        // Wait for activity on any file descriptor in the set
+        // select() blocks until at least one file descriptor is ready
         if(select(maxfd+1,&read_fds,NULL,NULL,NULL)<0){ perror("select"); exit(1); }
 
+        // Check if the server socket has a new connection
         if(FD_ISSET(sfd,&read_fds)){
+            // Accept a new client connection
             int cfd = accept(sfd,NULL,NULL);
             if(cfd>=0){
-                for(i=0;i<MAX_CLIENTS;i++){ if(clients[i]<0){ clients[i]=cfd; break; } }
+                // Find an empty slot in the clients array
+                for(i=0;i<MAX_CLIENTS;i++){ 
+                    if(clients[i]<0){ 
+                        clients[i]=cfd; 
+                        break; 
+                    } 
+                }
+                // Update maxfd if necessary
                 if(cfd>maxfd) maxfd=cfd;
+                // Add the new client socket to the set
                 FD_SET(cfd,&all_fds);
                 printf("Client connected.\n");
             }
         }
 
+        // Check all client sockets for incoming data
         for(i=0;i<MAX_CLIENTS;i++){
             int fd = clients[i];
-            if(fd<0) continue;
+            if(fd<0) continue;  // Skip empty slots
+            
+            // Check if this client has data to read
             if(FD_ISSET(fd,&read_fds)){
+                // Read message from the client
                 ssize_t n = read(fd,buf,BUF_SIZE-1);
-                if(n<=0){ close(fd); FD_CLR(fd,&all_fds); clients[i]=-1; printf("Client disconnected.\n"); }
-                else{ write(fd,buf,n); buf[n]='\0'; printf("Echoed: %s", buf); }
+                if(n<=0){
+                    // Client disconnected or error occurred
+                    close(fd);
+                    FD_CLR(fd,&all_fds);  // Remove from the set
+                    clients[i]=-1;        // Mark slot as empty
+                    printf("Client disconnected.\n");
+                } else {
+                    // Echo the message back to the same client
+                    write(fd,buf,n);
+                    // Null-terminate for printing
+                    buf[n]='\0';
+                    printf("Echoed: %s", buf);
+                }
             }
         }
     }
